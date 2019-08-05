@@ -1,0 +1,124 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: SAM template to build resources necessary for Twilio - Lambda integration.
+
+Parameters:
+  AppName:
+    Type: String
+    Default: SeekStore
+    Description: Name of the app we are building
+    
+  S3BucketName: # Requires unique bucket name
+    Type: String
+    Description: Name of S3 bucket
+  
+  S3ObjectName:
+    Type: String
+    Default: SeekStore # Name of the object storing your calls to Yelp
+    Description: Name of S3 object that stores data
+
+  RegionName:
+    Type: String
+    Description: Region of your app.
+
+  LambdaName:
+    Type: String
+    Default: lambda.zip
+    Description: Name of the lambda function.
+
+  YelpApiKey: # Requires your Yelp API key
+    Type: String
+    Description: API key to be used in Lambda function for making Yelp GET requests
+
+Resources:
+  Lambda:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      FunctionName: !Ref AppName
+      Handler: lambda.handler
+      Runtime: python3.7
+      CodeUri:
+        Bucket: !Ref S3BucketName
+        Key: !Ref LambdaName
+      Environment:
+        Variables:
+          S3_Bucket_Name: !Ref S3BucketName
+          S3_Object_Name: !Ref S3ObjectName
+          YELP_API_KEY: !Ref YelpApiKey
+      Policies:
+      - AWSLambdaExecute
+      - Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - s3:GetObject
+          - s3:PutObject
+          - s3:ListBucket
+          Resource:
+          - !Join [ '', ['arn:aws:s3:::', !Ref S3BucketName] ]
+          - !Sub
+            - 'arn:aws:s3:::${BucketName}/*'
+            - { BucketName: !Ref S3BucketName }
+      Events:
+        PostStore:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /
+            Method: POST
+
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Ref AppName
+      StageName: Prod
+      Variables:
+        LambdaFunctionName: !Ref Lambda
+      DefinitionBody:
+        swagger: 2.0
+        info:
+          title: !Ref AppName
+        basePath: "/Prod"
+        schemes:
+          - "https"
+        definitions:
+          Empty:
+            type: object
+            title: Empty Schema
+        paths:
+          /:
+            post:
+              consumes:
+              - "application/json"
+              produces:
+              - "application/xml"
+              responses:
+                '200':
+                  description: "200 response"
+                  schema:
+                    $ref: "#/definitions/Empty"
+                  headers:
+                    Content-Type:
+                      type: "string"
+              x-amazon-apigateway-integration:
+                responses:
+                  default:
+                    statusCode: "200"
+                    responseTemplates:
+                      application/xml: "#set($inputRoot = $input.path('$'))\n$inputRoot"
+                    responseParameters:
+                      method.response.header.Content-Type: "'application/xml'"
+                requestTemplates:
+                  application/x-www-form-urlencoded: "##following mapping template created by avilewin\n##https://forums.aws.amazon.com/thread.jspa?messageID=673012&tstart=0#673012\n## convert HTML POST data or HTTP GET query string to JSON\n## get the raw post data from the AWS built-in variable and give it a nicer name\n#if ($context.httpMethod == \"POST\")\n #set($rawAPIData = $input.path('$'))\n#elseif ($context.httpMethod == \"GET\")\n #set($rawAPIData = $input.params().querystring)\n #set($rawAPIData = $rawAPIData.toString())\n #set($rawAPIDataLength = $rawAPIData.length() - 1)\n #set($rawAPIData = $rawAPIData.substring(1, $rawAPIDataLength))\n #set($rawAPIData = $rawAPIData.replace(\", \", \"&\"))\n#else\n #set($rawAPIData = \"\")\n#end\n## first we get the number of '&' in the string, this tells us if there is more than one key value pair\n#set($countAmpersands = $rawAPIData.length() - $rawAPIData.replace(\"&\", \"\").length())\n## if there are no '&' at all then we have only one key value pair.\n## we append an ampersand to the string so that we can tokenise it the same way as multiple kv pairs.\n## the 'empty' kv pair to the right of the ampersand will be ignored anyway.\n#if ($countAmpersands == 0)\n #set($rawPostData = $rawAPIData + \"&\")\n#end\n## now we tokenise using the ampersand(s)\n#set($tokenisedAmpersand = $rawAPIData.split(\"&\"))\n## we set up a variable to hold the valid key value pairs\n#set($tokenisedEquals = [])\n## now we set up a loop to find the valid key value pairs, which must contain only one '='\n#foreach( $kvPair in $tokenisedAmpersand )\n #set($countEquals = $kvPair.length() - $kvPair.replace(\"=\", \"\").length())\n #if ($countEquals == 1)\n  #set($kvTokenised = $kvPair.split(\"=\"))\n  #if ($kvTokenised[0].length() > 0)\n   ## we found a valid key value pair. add it to the list.\n   #set($devNull = $tokenisedEquals.add($kvPair))\n  #end\n #end\n#end\n## next we set up our loop inside the output structure '{' and '}'\n{\n#foreach( $kvPair in $tokenisedEquals )\n  ## finally we output the JSON for this pair and append a comma if this isn't the last pair\n  #set($kvTokenised = $kvPair.split(\"=\"))\n \"$util.urlDecode($kvTokenised[0])\" : #if($kvTokenised[1].length() > 0)\"$util.urlDecode($kvTokenised[1])\"#{else}\"\"#end#if( $foreach.hasNext ),#end\n#end\n}"
+                uri: !Sub  "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Lambda.Arn}/invocations"
+                passthroughBehavior: "when_no_templates"
+                httpMethod: "POST"
+                contentHandling: "CONVERT_TO_TEXT"
+                type: "aws"
+
+Outputs:
+  ApiUrl:
+    Description: API endpoint
+    Value: !Sub
+      - "https://${API}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+      - { API: !Ref ApiGateway }
